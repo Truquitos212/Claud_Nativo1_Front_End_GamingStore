@@ -1,60 +1,117 @@
-import React, { useEffect, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Amplify } from 'aws-amplify';
-import { Authenticator, withAuthenticator } from '@aws-amplify/ui-react';
+import { fetchAuthSession } from 'aws-amplify/auth';
+import { withAuthenticator } from '@aws-amplify/ui-react';
 import '@aws-amplify/ui-react/styles.css';
 
-// Configuración con tus credenciales de AWS Cognito
+// Configuracion de Cognito (pool de CLIENTES) leida desde el archivo .env
 Amplify.configure({
   Auth: {
     Cognito: {
-      userPoolId: 'us-east-1_XXXXXXXXX', // Reemplaza con tu User Pool ID
-      userPoolClientId: 'XXXXXXXXXXXXXXXXXXXXXXXXXX', // Reemplaza con tu Client ID
-    }
-  }
+      userPoolId: import.meta.env.VITE_AWS_USER_POOL_ID,
+      userPoolClientId: import.meta.env.VITE_AWS_USER_POOL_CLIENT_ID,
+      loginWith: { email: true },
+    },
+  },
 });
 
+const API_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8080';
+
+// Token de acceso de la sesion actual (Amplify lo renueva solo si vencio)
+async function obtenerToken() {
+  const session = await fetchAuthSession();
+  return session.tokens?.accessToken?.toString();
+}
+
+function formatearPrecio(valor) {
+  return `$${Number(valor ?? 0).toLocaleString('es-CL', { maximumFractionDigits: 2 })}`;
+}
+
 function App({ signOut, user }) {
-  const [videojuegos, setVideojuegos] = useState([]);
+  const [juegos, setJuegos] = useState([]);
+  const [estado, setEstado] = useState('cargando'); // cargando | listo | error
+  const [error, setError] = useState('');
 
   useEffect(() => {
-    // Obtener el token de acceso JWT
-    const token = user?.signInDetails?.accessToken || '';
-
-    // Consumir tu Backend en Java de Videojuegos
-    fetch('http://localhost:8080/api/videojuegos', {
-      headers: {
-        'Authorization': `Bearer ${token}`
+    let activo = true;
+    (async () => {
+      try {
+        const token = await obtenerToken();
+        const res = await fetch(`${API_URL}/api/videojuegos`, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        if (!res.ok) throw new Error(`El backend respondio ${res.status}`);
+        const data = await res.json();
+        if (activo) {
+          setJuegos(data);
+          setEstado('listo');
+        }
+      } catch (e) {
+        if (activo) {
+          setError(e.message);
+          setEstado('error');
+        }
       }
-    })
-      .then(res => res.json())
-      .then(data => setVideojuegos(data))
-      .catch(err => console.error('Error al cargar juegos:', err));
-  }, [user]);
+    })();
+    return () => {
+      activo = false;
+    };
+  }, []);
+
+  const correo = user?.signInDetails?.loginId ?? user?.username;
 
   return (
-    <div style={{ padding: '2rem', fontFamily: 'sans-serif' }}>
-      <h1>🎮 Tienda de Videojuegos</h1>
-      <p>Usuario autenticado: <strong>{user?.username}</strong></p>
-      <button onClick={signOut} style={{ padding: '8px 16px', cursor: 'pointer' }}>
-        Cerrar Sesión
-      </button>
+    <div style={styles.pagina}>
+      <header style={styles.header}>
+        <h1 style={{ margin: 0 }}>🎮 GamingStore</h1>
+        <div style={styles.usuario}>
+          <span>{correo}</span>
+          <button onClick={signOut} style={styles.boton}>Cerrar sesión</button>
+        </div>
+      </header>
 
-      <hr style={{ margin: '20px 0' }} />
+      {estado === 'cargando' && <p>Cargando catálogo…</p>}
+      {estado === 'error' && <p style={styles.error}>No se pudo cargar el catálogo: {error}</p>}
+      {estado === 'listo' && juegos.length === 0 && <p>No hay videojuegos en el catálogo todavía.</p>}
 
-      <h2>Lista de Videojuegos</h2>
-      {videojuegos.length === 0 ? (
-        <p>Cargando juegos o no hay elementos disponibles...</p>
-      ) : (
-        <ul>
-          {videojuegos.map(juego => (
-            <li key={juego.id}>
-              <strong>{juego.titulo}</strong> - ${juego.precio}
-            </li>
-          ))}
-        </ul>
-      )}
+      <div style={styles.grilla}>
+        {juegos.map((juego) => {
+          const descuento = juego.descuento ?? 0;
+          const precioFinal = (juego.precio ?? 0) * (1 - descuento / 100);
+          return (
+            <article key={juego.id} style={styles.tarjeta}>
+              {juego.imagenUrl && <img src={juego.imagenUrl} alt={juego.titulo} style={styles.portada} />}
+              <div style={{ padding: '12px' }}>
+                <h3 style={{ margin: '0 0 6px' }}>{juego.titulo}</h3>
+                <p style={styles.meta}>{juego.genero}{juego.desarrollador ? ` · ${juego.desarrollador}` : ''}</p>
+                <p style={{ margin: '6px 0' }}>
+                  {descuento > 0 && <s style={{ opacity: 0.6, marginRight: 6 }}>{formatearPrecio(juego.precio)}</s>}
+                  <strong>{formatearPrecio(precioFinal)}</strong>
+                  {descuento > 0 && <span style={styles.badge}>-{descuento}%</span>}
+                </p>
+                <p style={{ margin: 0, color: juego.stock > 0 ? '#2e7d32' : '#c62828' }}>
+                  {juego.stock > 0 ? `${juego.stock} en stock` : 'Agotado'}
+                </p>
+              </div>
+            </article>
+          );
+        })}
+      </div>
     </div>
   );
 }
+
+const styles = {
+  pagina: { padding: '24px', fontFamily: 'system-ui, sans-serif', maxWidth: 1200, margin: '0 auto', textAlign: 'left' },
+  header: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 24, gap: 12, flexWrap: 'wrap' },
+  usuario: { display: 'flex', alignItems: 'center', gap: 12 },
+  boton: { padding: '8px 16px', cursor: 'pointer', borderRadius: 6, border: 'none', background: '#dc3545', color: 'white', fontWeight: 'bold' },
+  error: { color: '#c62828' },
+  grilla: { display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))', gap: 16 },
+  tarjeta: { border: '1px solid #ddd', borderRadius: 10, overflow: 'hidden' },
+  portada: { width: '100%', height: 280, objectFit: 'cover', display: 'block' },
+  meta: { margin: 0, opacity: 0.7, fontSize: 14 },
+  badge: { marginLeft: 8, background: '#2e7d32', color: 'white', borderRadius: 4, padding: '1px 6px', fontSize: 12 },
+};
 
 export default withAuthenticator(App);
