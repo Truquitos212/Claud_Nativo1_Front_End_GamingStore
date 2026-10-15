@@ -23,6 +23,18 @@ async function obtenerToken() {
   return session.tokens?.accessToken?.toString();
 }
 
+// Envia la compra al backend, que la deja en la cola SQS (responde 202 al tiro)
+async function comprar(videojuegoId, cliente) {
+  const token = await obtenerToken();
+  const res = await fetch(`${API_URL}/api/ordenes`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+    body: JSON.stringify({ videojuegoId, cantidad: 1, cliente }),
+  });
+  if (!res.ok) throw new Error(`El backend respondio ${res.status}`);
+  return res.json();
+}
+
 function formatearPrecio(valor) {
   return `$${Number(valor ?? 0).toLocaleString('es-CL', { maximumFractionDigits: 2 })}`;
 }
@@ -31,34 +43,42 @@ function App({ signOut, user }) {
   const [juegos, setJuegos] = useState([]);
   const [estado, setEstado] = useState('cargando'); // cargando | listo | error
   const [error, setError] = useState('');
+  const [aviso, setAviso] = useState('');
+  const [comprando, setComprando] = useState(null);
 
-  useEffect(() => {
-    let activo = true;
-    (async () => {
-      try {
-        const token = await obtenerToken();
-        const res = await fetch(`${API_URL}/api/videojuegos`, {
-          headers: { Authorization: `Bearer ${token}` },
-        });
-        if (!res.ok) throw new Error(`El backend respondio ${res.status}`);
-        const data = await res.json();
-        if (activo) {
-          setJuegos(data);
-          setEstado('listo');
-        }
-      } catch (e) {
-        if (activo) {
-          setError(e.message);
-          setEstado('error');
-        }
-      }
-    })();
-    return () => {
-      activo = false;
-    };
-  }, []);
+  const cargar = async () => {
+    try {
+      const token = await obtenerToken();
+      const res = await fetch(`${API_URL}/api/videojuegos`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!res.ok) throw new Error(`El backend respondio ${res.status}`);
+      setJuegos(await res.json());
+      setEstado('listo');
+    } catch (e) {
+      setError(e.message);
+      setEstado('error');
+    }
+  };
+
+  useEffect(() => { cargar(); }, []);
 
   const correo = user?.signInDetails?.loginId ?? user?.username;
+
+  const alComprar = async (juego) => {
+    setComprando(juego.id);
+    setAviso('');
+    try {
+      const r = await comprar(juego.id, correo);
+      setAviso(`✅ ${r.mensaje} (orden ${r.ordenId.slice(0, 8)})`);
+      // La orden se procesa en segundo plano: recargamos el stock en unos segundos
+      setTimeout(cargar, 4000);
+    } catch (e) {
+      setAviso(`❌ No se pudo enviar la compra: ${e.message}`);
+    } finally {
+      setComprando(null);
+    }
+  };
 
   return (
     <div style={styles.pagina}>
@@ -70,6 +90,7 @@ function App({ signOut, user }) {
         </div>
       </header>
 
+      {aviso && <p style={styles.aviso}>{aviso}</p>}
       {estado === 'cargando' && <p>Cargando catálogo…</p>}
       {estado === 'error' && <p style={styles.error}>No se pudo cargar el catálogo: {error}</p>}
       {estado === 'listo' && juegos.length === 0 && <p>No hay videojuegos en el catálogo todavía.</p>}
@@ -92,6 +113,13 @@ function App({ signOut, user }) {
                 <p style={{ margin: 0, color: juego.stock > 0 ? '#2e7d32' : '#c62828' }}>
                   {juego.stock > 0 ? `${juego.stock} en stock` : 'Agotado'}
                 </p>
+                <button
+                  onClick={() => alComprar(juego)}
+                  disabled={comprando === juego.id}
+                  style={styles.comprar}
+                >
+                  {comprando === juego.id ? 'Enviando…' : 'Comprar'}
+                </button>
               </div>
             </article>
           );
@@ -107,6 +135,8 @@ const styles = {
   usuario: { display: 'flex', alignItems: 'center', gap: 12 },
   boton: { padding: '8px 16px', cursor: 'pointer', borderRadius: 6, border: 'none', background: '#dc3545', color: 'white', fontWeight: 'bold' },
   error: { color: '#c62828' },
+  aviso: { padding: '10px 14px', borderRadius: 8, background: '#eef6ee', color: '#1b5e20', border: '1px solid #c8e6c9' },
+  comprar: { marginTop: 10, width: '100%', padding: '8px', cursor: 'pointer', borderRadius: 6, border: 'none', background: '#1f6feb', color: 'white', fontWeight: 'bold' },
   grilla: { display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))', gap: 16 },
   tarjeta: { border: '1px solid #ddd', borderRadius: 10, overflow: 'hidden' },
   portada: { width: '100%', height: 280, objectFit: 'cover', display: 'block' },
